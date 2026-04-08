@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ubuntu Codexbar"
+  short_description: "Manage Codex saved login profiles and usage on Ubuntu"
+  default_prompt: "Use $ubuntu-codexbar to inspect, switch, or debug saved Codex login profiles and usage on Ubuntu with the local codexbar CLI."

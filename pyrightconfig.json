@@ -1,0 +1,10 @@
+{
+  "include": [
+    "src",
+    "tests"
+  ],
+  "extraPaths": [
+    "src"
+  ],
+  "venvPath": "/home/andy/miniconda3/envs"
+}
