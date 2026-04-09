@@ -3,9 +3,10 @@ name: ubuntu-codexbar
 description: |
   Use when managing or debugging saved Codex login profiles on Ubuntu with the
   local `codexbar` CLI. Covers profile capture and switching, `active_profile`
-  vs current root auth mismatches, duplicate saved identities, and `usage`,
-  `usage --all`, `usage --all --refresh`, `whoami`, `doctor`, and `validate`
-  workflows under `~/.codex` and `~/.codexbar`.
+  vs current root auth mismatches, duplicate saved identities, current-root
+  usage, saved per-profile usage snapshots, and `usage`, `usage --all`,
+  `whoami`, `doctor`, and `validate` workflows under `~/.codex` and
+  `~/.codexbar`.
 ---
 
 # Ubuntu Codexbar
@@ -32,7 +33,8 @@ codexbar usage
 codexbar usage --all
 ```
 
-Refresh canonical saved-profile usage only when needed:
+Legacy compatibility flags are still accepted, but they do not trigger live
+saved-profile probing in the current CLI:
 
 ```bash
 codexbar usage --all --refresh
@@ -50,17 +52,17 @@ codexbar capture main --overwrite
 2. Use `whoami` and `doctor` before telling the user which account is really active.
 3. Use `list`, `create`, `capture`, `activate`, and `switch` to manage saved profiles.
 4. Use `usage` for the current-root local session view.
-5. Use `usage --all` for cached per-profile snapshots.
-6. Use `usage --all --refresh` only when the user wants live probing of canonical saved profiles.
+5. Use `usage --all` for saved per-profile session snapshots plus current-root context.
+6. Treat `usage --all --refresh` and `--timeout` as deprecated compatibility flags, not live probing controls.
 7. Use `validate` before switching if a saved profile looks incomplete or inconsistent.
 
 ## Rules
 
 - Treat the current root auth on disk as the live truth.
 - Treat saved `active_profile` as state, not guaranteed live identity.
-- Explain cached vs live usage explicitly when the two differ.
+- Explain current-root session snapshots vs saved per-profile snapshots explicitly.
 - Expect canonical-profile suppression when two saved names map to the same identity.
-- Use `--refresh` sparingly because it probes each canonical profile in a scratch `CODEX_HOME`.
+- Do not promise that `--refresh` probes canonical saved profiles in the current CLI.
 - Keep shared session history under `~/.codex/sessions`; do not invent per-profile session silos unless the user explicitly wants a different design.
 
 ## Reference

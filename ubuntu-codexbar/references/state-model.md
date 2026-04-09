@@ -30,7 +30,8 @@ chooses one canonical saved profile.
 
 ## Usage Semantics
 
-- current-root live usage comes from the latest local session log snapshot
-- per-profile rows in `usage --all` are cached snapshots unless explicitly refreshed
+- current-root usage comes from the latest local session log snapshot
+- per-profile rows in `usage --all` come from saved session snapshots
+- `usage --all --refresh` is retained for compatibility, but does not refresh saved profiles in the current CLI
 - if saved active profile and current root profile differ, explain the mismatch
   directly instead of treating the saved state as live truth

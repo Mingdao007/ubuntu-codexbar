@@ -7,7 +7,7 @@ Use this reference when the user needs the exact command to run next.
 From the repository root:
 
 ```bash
-python3 -m pip install --user --no-deps --no-build-isolation .
+python3 -m pip install --user --no-deps --no-build-isolation -e .
 codexbar --help
 ```
 
@@ -59,5 +59,5 @@ codexbar usage --history --days 30
 ```
 
 - `usage` focuses on the latest current-root local session view.
-- `usage --all` shows per-profile cached snapshots and current-root context.
-- `usage --all --refresh` probes each canonical saved profile and updates cache.
+- `usage --all` shows saved per-profile session snapshots and current-root context.
+- `usage --all --refresh` is a deprecated compatibility form; it does not trigger live probing in the current CLI.

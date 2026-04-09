@@ -9,7 +9,7 @@ English README: [README.md](README.md)
 
 - 管理 `~/.codexbar/profiles` 下的多套保存登录
 - 区分保存的 `active_profile` 和当前磁盘 root auth
-- 查看本地 usage、各 profile 的缓存 usage、以及 current-root live usage
+- 查看 current-root usage 和各 profile 保存下来的 session snapshot
 - 解释重复身份、stale state 和 canonical profile 规则
 
 ## 主要内容
@@ -23,12 +23,21 @@ English README: [README.md](README.md)
 1. 在仓库根目录安装 CLI：
 
 ```bash
-python3 -m pip install --user --no-deps --no-build-isolation .
+python3 -m pip install --user --no-deps --no-build-isolation -e .
+```
+
+安装后验证 `codexbar` 确实来自当前仓库：
+
+```bash
+python3 -c "import codexbar; print(codexbar.__file__)"
 ```
 
 2. 把 `ubuntu-codexbar/` 复制到 `${CODEX_HOME:-$HOME/.codex}/skills/`。
 3. 重启 Codex 或刷新 skills。
 4. 用 `$ubuntu-codexbar` 调用这个 skill。
+
+`codexbar usage --all --refresh` 目前还保留作兼容参数，但不会再触发 live
+saved-profile probing。
 
 ## 致谢
 

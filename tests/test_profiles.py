@@ -5,11 +5,11 @@ from __future__ import annotations
 import argparse
 import base64
 import json
-import subprocess
 from pathlib import Path
 
 import pytest
 
+import codexbar.quota_probe as quota_probe
 from codexbar.auth_identity import read_profile_identity
 from codexbar.cli import cmd_mark_session, cmd_usage, cmd_whoami
 from codexbar.fs_utils import read_json, write_json_atomic
@@ -283,8 +283,8 @@ def test_usage_all_prints_cached_profile_usage(tmp_path, capsys):
     store.create_profile_from_directory("alpha", alpha_dir, ["auth.json", "config.toml"], description="alpha")
     store.create_profile_from_directory("beta", beta_dir, ["auth.json", "config.toml"], description="beta")
     store.set_active_profile("alpha")
-    store.write_quota_cache("alpha", _snapshot("2026-04-08T10:00:00Z", 25, 40))
-    store.write_quota_cache("beta", _snapshot("2026-04-08T11:00:00Z", 5, 15, source="live-probe"))
+    store.write_quota_cache("alpha", _snapshot("2026-04-09T10:00:00Z", 25, 40))
+    store.write_quota_cache("beta", _snapshot("2026-04-09T11:00:00Z", 5, 15))
 
     args = argparse.Namespace(
         days=None,
@@ -307,6 +307,75 @@ def test_usage_all_prints_cached_profile_usage(tmp_path, capsys):
     assert "5h:" in output
     assert "1w:" in output
     assert "% used" not in output
+
+
+def test_usage_all_uses_saved_snapshot_even_when_refresh_flag_is_set(tmp_path, capsys):
+    codex_home = tmp_path / "codex"
+    codexbar_home = tmp_path / "codexbar"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    paths = AppPaths(codex_home=codex_home, codexbar_home=codexbar_home)
+    store = ProfileStore(paths)
+    store.ensure_layout()
+
+    for name, account_id in [("alpha", "acct-A"), ("beta", "acct-B")]:
+        profile_dir = tmp_path / name
+        _write_auth(profile_dir / "auth.json", account_id, org_title=name)
+        _write_config(profile_dir / "config.toml")
+        store.create_profile_from_directory(name, profile_dir, ["auth.json", "config.toml"], description=name)
+        store.write_quota_cache(name, _snapshot("2026-04-09T10:00:00Z", 10, 20))
+
+    args = argparse.Namespace(
+        days=None,
+        top=5,
+        all_profiles=True,
+        refresh=True,
+        timeout=20,
+        history=False,
+        as_json=False,
+    )
+    cmd_usage(paths, store, args)
+    output = capsys.readouterr().out
+
+    assert "Cached snapshot:" in output
+    assert "Status probe:" not in output
+
+
+def test_usage_all_shows_cached_snapshot_when_present(tmp_path, capsys):
+    codex_home = tmp_path / "codex"
+    codexbar_home = tmp_path / "codexbar"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    paths = AppPaths(codex_home=codex_home, codexbar_home=codexbar_home)
+    store = ProfileStore(paths)
+    store.ensure_layout()
+
+    alpha_dir = tmp_path / "alpha"
+    _write_auth(alpha_dir / "auth.json", "acct-A", org_title="Main")
+    _write_config(alpha_dir / "config.toml")
+    store.create_profile_from_directory("alpha", alpha_dir, ["auth.json", "config.toml"], description="alpha")
+    store.write_quota_cache("alpha", _snapshot("2026-04-08T10:00:00Z", 25, 40))
+
+    args = argparse.Namespace(
+        days=None,
+        top=5,
+        all_profiles=True,
+        refresh=False,
+        timeout=30,
+        history=False,
+        as_json=False,
+    )
+    cmd_usage(paths, store, args)
+    output = capsys.readouterr().out
+
+    assert "Cached snapshot: 2026-04-08T10:00:00Z via root-session" in output
+    assert "Live /status probe failed" not in output
+    assert "Status probe:" not in output
+
+    args.as_json = True
+    cmd_usage(paths, store, args)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["profiles"][0]["display_snapshot"]["observed_at"] == "2026-04-08T10:00:00Z"
+    assert payload["profiles"][0]["cache"]["observed_at"] == "2026-04-08T10:00:00Z"
 
 
 def test_usage_all_reports_current_root_profile_when_state_is_stale(tmp_path, capsys):
@@ -347,7 +416,7 @@ def test_usage_all_reports_current_root_profile_when_state_is_stale(tmp_path, ca
     assert "Current root identity: team / Personal / acct-cloud" in output
     assert "Root auth does not match the saved active profile." in output
     assert "No current-root live session snapshot was found for this login." in output
-    assert "Per-profile rows below are cached snapshots unless refreshed." in output
+    assert "Per-profile rows below use saved session snapshots." in output
     assert "GPT Business (active)" in output
     assert "云端 (current root)" in output
     assert "Current root usage" not in output
@@ -355,7 +424,7 @@ def test_usage_all_reports_current_root_profile_when_state_is_stale(tmp_path, ca
     assert "% used" not in output
 
 
-def test_usage_all_prefers_current_root_live_snapshot_when_state_is_stale(tmp_path, capsys):
+def test_usage_all_prefers_current_root_session_snapshot_when_state_is_stale(tmp_path, capsys):
     codex_home = tmp_path / "codex"
     codexbar_home = tmp_path / "codexbar"
     codex_home.mkdir(parents=True, exist_ok=True)
@@ -381,7 +450,6 @@ def test_usage_all_prefers_current_root_live_snapshot_when_state_is_stale(tmp_pa
         34,
         56,
     )
-
     args = argparse.Namespace(
         days=None,
         top=5,
@@ -397,14 +465,14 @@ def test_usage_all_prefers_current_root_live_snapshot_when_state_is_stale(tmp_pa
     assert "Current root usage" in output
     assert "  Profile: KKsk" in output
     assert "  Source: local session snapshot" in output
-    assert "Current root live snapshot: 2026-04-10T10:05:00Z via root-session" in output
+    assert "Current root session snapshot: 2026-04-10T10:05:00Z via root-session" in output
     assert "Cached snapshot: 2026-04-08T10:00:00Z via root-session" in output
     assert "Only the current-root usage block below reflects the current login." in output
-    assert "5h: 66% remaining" in output
+    assert "5h: 100% remaining" in output
     assert "1w: 44% remaining" in output
 
 
-def test_usage_all_json_includes_current_root_live_snapshot(tmp_path, capsys):
+def test_usage_all_json_includes_current_root_session_snapshot(tmp_path, capsys):
     codex_home = tmp_path / "codex"
     codexbar_home = tmp_path / "codexbar"
     codex_home.mkdir(parents=True, exist_ok=True)
@@ -418,6 +486,7 @@ def test_usage_all_json_includes_current_root_live_snapshot(tmp_path, capsys):
     store.create_profile_from_directory("alpha", alpha_dir, ["auth.json", "config.toml"], description="alpha")
     store.set_active_profile("alpha")
     _write_auth(codex_home / "auth.json", "acct-alpha", org_title="Main")
+    store.write_quota_cache("alpha", _snapshot("2026-04-09T08:00:00Z", 11, 21))
     _write_rate_limit_session(
         codex_home / "sessions" / "2026" / "04" / "10" / "limits.jsonl",
         "2026-04-10T10:05:00Z",
@@ -439,7 +508,57 @@ def test_usage_all_json_includes_current_root_live_snapshot(tmp_path, capsys):
 
     assert payload["canonical_root_profile"] == "alpha"
     assert payload["current_root_live_snapshot"]["observed_at"] == "2026-04-10T10:05:00Z"
-    assert payload["profiles"][0]["display_snapshot_label"] == "Current root live snapshot"
+    assert payload["current_root_live_snapshot"]["source"] == "root-session"
+    assert payload["profiles"][0]["display_snapshot_label"] == "Current root session snapshot"
+
+
+def test_usage_all_keeps_orphaned_root_session_separate_from_saved_profiles(tmp_path, capsys):
+    codex_home = tmp_path / "codex"
+    codexbar_home = tmp_path / "codexbar"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    paths = AppPaths(codex_home=codex_home, codexbar_home=codexbar_home)
+    store = ProfileStore(paths)
+    store.ensure_layout()
+
+    alpha_dir = tmp_path / "alpha"
+    _write_auth(alpha_dir / "auth.json", "acct-alpha", org_title="Main")
+    _write_config(alpha_dir / "config.toml")
+    store.create_profile_from_directory("alpha", alpha_dir, ["auth.json", "config.toml"], description="alpha")
+    store.set_active_profile("alpha")
+    _write_rate_limit_session(
+        codex_home / "sessions" / "2026" / "04" / "10" / "limits.jsonl",
+        "2026-04-10T10:05:00Z",
+        20,
+        30,
+    )
+
+    args = argparse.Namespace(
+        days=None,
+        top=5,
+        all_profiles=True,
+        refresh=False,
+        timeout=30,
+        history=False,
+        as_json=False,
+    )
+    cmd_usage(paths, store, args)
+    output = capsys.readouterr().out
+
+    assert "Current root profile: -" in output
+    assert "Current root usage (old terminal / orphaned root-session)" in output
+    assert "  Source: local session snapshot from old terminal" in output
+    assert "Profile: alpha" not in output
+    assert "alpha (active)" in output
+    assert "Usage: unknown" in output
+    assert "Cached snapshot:" not in output
+
+    args.as_json = True
+    cmd_usage(paths, store, args)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["canonical_root_profile"] is None
+    assert payload["current_root_live_snapshot"]["source"] == "orphaned-root-session"
+    assert payload["profiles"][0]["display_snapshot"] is None
 
 
 def test_profile_relationships_pick_earliest_created_profile_as_canonical(tmp_path):
@@ -522,7 +641,7 @@ def test_profile_relationships_fallback_without_account_id(tmp_path):
     assert relationships["beta"]["duplicate_of"] == "alpha"
 
 
-def test_usage_all_writes_root_session_cache_to_canonical_and_suppresses_duplicate(tmp_path, capsys):
+def test_usage_all_writes_root_session_cache_to_canonical_and_suppresses_duplicate(tmp_path, capsys, monkeypatch):
     codex_home = tmp_path / "codex"
     codexbar_home = tmp_path / "codexbar"
     codex_home.mkdir(parents=True, exist_ok=True)
@@ -572,7 +691,6 @@ def test_usage_all_writes_root_session_cache_to_canonical_and_suppresses_duplica
             }
         ],
     )
-
     args = argparse.Namespace(
         days=None,
         top=5,
@@ -590,10 +708,10 @@ def test_usage_all_writes_root_session_cache_to_canonical_and_suppresses_duplica
     assert "KKsk (active)" in output
     assert "Duplicate identity of main; usage suppressed" in output
     assert "main" in output
-    assert "Current root live snapshot:" in output
+    assert "Current root session snapshot:" in output
 
 
-def test_usage_all_refresh_skips_duplicate_profiles(tmp_path, capsys, monkeypatch):
+def test_usage_all_refresh_keeps_duplicate_profiles_suppressed(tmp_path, capsys):
     codex_home = tmp_path / "codex"
     codexbar_home = tmp_path / "codexbar"
     codex_home.mkdir(parents=True, exist_ok=True)
@@ -617,13 +735,8 @@ def test_usage_all_refresh_skips_duplicate_profiles(tmp_path, capsys, monkeypatc
     _set_profile_created_at(store, "KKsk", "2026-04-08T15:02:53Z")
     _rewrite_profile_auth(store, "KKsk", _auth_payload("acct-A", org_title="Main"))
 
-    calls = []
-
-    def _fake_refresh(store_arg, profile_name, timeout_seconds=90, codex_command="codex"):
-        calls.append(profile_name)
-        return _snapshot("2026-04-08T11:00:00Z", 12, 34, source="live-probe")
-
-    monkeypatch.setattr("codexbar.cli.refresh_profile_quota", _fake_refresh)
+    store.write_quota_cache("main", _snapshot("2026-04-08T11:00:00Z", 12, 34))
+    store.write_quota_cache("beta", _snapshot("2026-04-08T11:00:00Z", 12, 34))
 
     args = argparse.Namespace(
         days=None,
@@ -637,8 +750,8 @@ def test_usage_all_refresh_skips_duplicate_profiles(tmp_path, capsys, monkeypatc
     cmd_usage(paths, store, args)
     output = capsys.readouterr().out
 
-    assert calls == ["beta", "main"]
-    assert "Refresh: skipped (duplicate identity of main)" in output
+    assert "Duplicate identity of main; usage suppressed" in output
+    assert "Status probe:" not in output
 
 
 def test_mark_session_is_deprecated(tmp_path):
@@ -750,7 +863,27 @@ def test_whoami_reports_canonical_saved_profile_for_duplicate_active_profile(tmp
     assert "Canonical saved profile: main" in output
 
 
-def test_refresh_profile_quota_reads_scratch_sessions(tmp_path, monkeypatch):
+def test_parse_status_snapshot_extracts_keyword_windows():
+    snapshot = quota_probe._parse_status_snapshot(
+        "\x1b[32m/status\x1b[0m "
+        "Plan: team "
+        "Limit ID: codex "
+        "5h rate limit used: 2% remaining: 98% "
+        "1 week rate limit used: 80% remaining: 20%"
+    )
+
+    assert snapshot is not None
+    assert snapshot.plan_type == "team"
+    assert snapshot.limit_id == "codex"
+    assert snapshot.primary is not None
+    assert snapshot.primary.used_percent == 2.0
+    assert snapshot.primary.remaining_percent == 98.0
+    assert snapshot.secondary is not None
+    assert snapshot.secondary.used_percent == 80.0
+    assert snapshot.secondary.remaining_percent == 20.0
+
+
+def test_refresh_profile_quota_reads_status_probe_output(tmp_path, monkeypatch):
     codex_home = tmp_path / "codex"
     codexbar_home = tmp_path / "codexbar"
     codex_home.mkdir(parents=True, exist_ok=True)
@@ -762,32 +895,19 @@ def test_refresh_profile_quota_reads_scratch_sessions(tmp_path, monkeypatch):
     _write_config(codex_home / "config.toml")
     store.create_profile_from_root("alpha", codex_home)
 
-    def _fake_run(args, input, stdout, stderr, text, check, timeout, env):
-        session_path = Path(env["CODEX_HOME"]) / "sessions" / "2026" / "04" / "08" / "probe.jsonl"
-        session_path.parent.mkdir(parents=True, exist_ok=True)
-        session_path.write_text(
-            json.dumps(
-                {
-                    "timestamp": "2026-04-08T15:22:16.206Z",
-                    "type": "event_msg",
-                    "payload": {
-                        "type": "token_count",
-                        "info": None,
-                        "rate_limits": {
-                            "limit_id": "codex",
-                            "plan_type": "team",
-                            "primary": {"used_percent": 2.0, "window_minutes": 300, "resets_at": 1775679643},
-                            "secondary": {"used_percent": 80.0, "window_minutes": 10080, "resets_at": 1775831408},
-                        },
-                    },
-                }
-            )
-            + "\n",
-            encoding="utf-8",
+    def _fake_capture(codex_command, env, timeout_seconds):
+        scratch_root = Path(env["CODEX_HOME"])
+        assert scratch_root.parent == codexbar_home / "probe-homes"
+        assert (scratch_root / "auth.json").is_file()
+        assert (scratch_root / "config.toml").is_file()
+        return (
+            "Plan: team "
+            "Limit ID: codex "
+            "5h used: 2% remaining: 98% "
+            "1 week used: 80% remaining: 20%"
         )
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout="{}", stderr="")
 
-    monkeypatch.setattr("codexbar.quota_probe.subprocess.run", _fake_run)
+    monkeypatch.setattr("codexbar.quota_probe._capture_status_text", _fake_capture)
 
     snapshot = refresh_profile_quota(store, "alpha", timeout_seconds=5)
 
@@ -796,3 +916,37 @@ def test_refresh_profile_quota_reads_scratch_sessions(tmp_path, monkeypatch):
     assert snapshot.primary.used_percent == 2.0
     assert snapshot.secondary is not None
     assert snapshot.secondary.used_percent == 80.0
+
+
+def test_refresh_profile_quota_retries_after_empty_output(tmp_path, monkeypatch):
+    codex_home = tmp_path / "codex"
+    codexbar_home = tmp_path / "codexbar"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    paths = AppPaths(codex_home=codex_home, codexbar_home=codexbar_home)
+    store = ProfileStore(paths)
+    store.ensure_layout()
+
+    _write_auth(codex_home / "auth.json", "acct-A", org_title="Main")
+    _write_config(codex_home / "config.toml")
+    store.create_profile_from_root("alpha", codex_home)
+
+    attempts: list[float] = []
+
+    def _fake_capture(codex_command, env, timeout_seconds):
+        attempts.append(timeout_seconds)
+        if len(attempts) == 1:
+            return ""
+        return (
+            "Plan: team "
+            "Limit ID: codex "
+            "5h used: 2% remaining: 98% "
+            "1 week used: 80% remaining: 20%"
+        )
+
+    monkeypatch.setattr("codexbar.quota_probe._capture_status_text", _fake_capture)
+
+    snapshot = refresh_profile_quota(store, "alpha", timeout_seconds=20)
+
+    assert len(attempts) == 2
+    assert snapshot.primary is not None
+    assert snapshot.primary.remaining_percent == 98.0

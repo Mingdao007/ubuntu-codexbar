@@ -18,7 +18,7 @@ Chinese mirror: [README.zh-CN.md](README.zh-CN.md)
 
 - Need to capture and manage multiple saved Codex login profiles under `~/.codexbar/profiles`
 - Need to switch or inspect accounts without confusing saved `active_profile` with the current root auth on disk
-- Need to inspect local usage, cached per-profile usage, and current-root live usage from local session logs
+- Need to inspect current-root usage and saved per-profile session snapshots from local session logs
 - Need to explain duplicate saved identities, stale state, and canonical profile behavior on Ubuntu
 
 ## What Ships
@@ -33,7 +33,13 @@ Chinese mirror: [README.zh-CN.md](README.zh-CN.md)
 1. Install the CLI from this repository:
 
 ```bash
-python3 -m pip install --user --no-deps --no-build-isolation .
+python3 -m pip install --user --no-deps --no-build-isolation -e .
+```
+
+Verify that the command is importing this checkout:
+
+```bash
+python3 -c "import codexbar; print(codexbar.__file__)"
 ```
 
 2. Copy `ubuntu-codexbar/` into `${CODEX_HOME:-$HOME/.codex}/skills/`.
@@ -50,9 +56,11 @@ codexbar capture main --overwrite
 codexbar whoami
 codexbar usage
 codexbar usage --all
-codexbar usage --all --refresh
 codexbar doctor
 ```
+
+`codexbar usage --all --refresh` is still accepted for compatibility, but in the
+current CLI it does not perform live saved-profile probing.
 
 ## Attribution
 

@@ -11,10 +11,9 @@ from .auth_identity import read_profile_identity
 from .importers import import_legacy_account_backup
 from .paths import AppPaths, DEFAULT_MANAGED_PATHS
 from .profile_store import ProfileStore
-from .quota_probe import refresh_profile_quota
 from .switch_engine import SwitchEngine, is_codex_process_running
 from .tui import run_tui
-from .usage_stats import RateLimitWindow, summarize_usage
+from .usage_stats import RateLimitSnapshot, RateLimitWindow, summarize_usage
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -81,9 +80,23 @@ def build_parser() -> argparse.ArgumentParser:
     usage_parser = sub.add_parser("usage", help="Summarize local token usage from session logs")
     usage_parser.add_argument("--days", type=int, default=None, help="Only include session files modified in the last N days")
     usage_parser.add_argument("--top", type=int, default=5, help="Show top N sessions by total tokens")
-    usage_parser.add_argument("--all", action="store_true", dest="all_profiles", help="Show cached usage for all saved profiles")
-    usage_parser.add_argument("--refresh", action="store_true", help="Refresh saved profile usage by probing each profile")
-    usage_parser.add_argument("--timeout", type=int, default=90, help="Timeout in seconds for each live usage probe")
+    usage_parser.add_argument(
+        "--all",
+        action="store_true",
+        dest="all_profiles",
+        help="Show saved session snapshots for all saved profiles",
+    )
+    usage_parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Deprecated compatibility no-op; usage --all only reads saved session snapshots",
+    )
+    usage_parser.add_argument(
+        "--timeout",
+        type=int,
+        default=20,
+        help="Deprecated compatibility no-op when reading saved session snapshots",
+    )
     usage_parser.add_argument("--history", action="store_true", help="Also show local session totals and top sessions")
     usage_parser.add_argument("--json", action="store_true", dest="as_json", help="Output machine-readable JSON")
 
@@ -316,20 +329,20 @@ def cmd_usage(paths: AppPaths, store: ProfileStore, args: argparse.Namespace) ->
         raise ValueError("--refresh requires --all")
 
     summary = summarize_usage(paths, days=args.days, top=args.top)
-    current_root_live_snapshot = summary.current_rate_limits
     state = store.state_snapshot()
     active_profile = state["active_profile"]
     root_identity = read_profile_identity(paths.codex_home / "auth.json")
     relationships = store.profile_relationships()
     canonical_root_profile = store.canonical_profile_for_identity(root_identity)
+    current_root_live_snapshot = _normalize_current_root_live_snapshot(
+        summary.current_rate_limits,
+        canonical_root_profile=canonical_root_profile,
+        root_identity=root_identity,
+    )
+    summary.current_rate_limits = current_root_live_snapshot
 
-    if current_root_live_snapshot:
-        if canonical_root_profile is not None:
-            store.write_quota_cache(canonical_root_profile.name, current_root_live_snapshot.with_source("root-session"))
-        elif active_profile:
-            active_meta = store.get_profile(active_profile)
-            if active_meta.identity.is_empty():
-                store.write_quota_cache(active_profile, current_root_live_snapshot.with_source("root-session"))
+    if current_root_live_snapshot and canonical_root_profile is not None:
+        store.write_quota_cache(canonical_root_profile.name, current_root_live_snapshot.with_source("root-session"))
 
     if args.all_profiles:
         canonical_root_profile_name = canonical_root_profile.name if canonical_root_profile else None
@@ -342,7 +355,7 @@ def cmd_usage(paths: AppPaths, store: ProfileStore, args: argparse.Namespace) ->
             active_profile=active_profile,
             current_root_profile=canonical_root_profile_name,
             current_root_live_snapshot=current_root_live_snapshot,
-            refresh=args.refresh,
+            show_refresh_status=args.refresh,
             timeout=args.timeout,
         )
         if args.as_json:
@@ -370,9 +383,9 @@ def cmd_usage(paths: AppPaths, store: ProfileStore, args: argparse.Namespace) ->
                 print("Only the current-root usage block below reflects the current login.")
             else:
                 print("No current-root live session snapshot was found for this login.")
-            print("Per-profile rows below are cached snapshots unless refreshed.")
+            print("Per-profile rows below use saved session snapshots.")
         if current_root_live_snapshot:
-            print("Current root usage")
+            print(_current_root_usage_heading(canonical_root_profile, root_identity))
             if canonical_root_profile_name:
                 print(f"  Profile: {canonical_root_profile_name}")
             print(f"  As of: {_format_iso_datetime(current_root_live_snapshot.observed_at)}")
@@ -380,7 +393,7 @@ def cmd_usage(paths: AppPaths, store: ProfileStore, args: argparse.Namespace) ->
                 plan = current_root_live_snapshot.plan_type or "-"
                 limit_id = current_root_live_snapshot.limit_id or "-"
                 print(f"  Plan: {plan} ({limit_id})")
-            print("  Source: local session snapshot")
+            print(f"  Source: {_current_root_usage_source_detail(canonical_root_profile, root_identity)}")
             for line in _format_snapshot_windows(current_root_live_snapshot):
                 print(f"  {line}")
         for row in profile_rows:
@@ -401,9 +414,9 @@ def cmd_usage(paths: AppPaths, store: ProfileStore, args: argparse.Namespace) ->
             elif not row["status"]:
                 print("  Usage: unknown")
             if row["refresh_error"]:
-                print(f"  Refresh: failed ({row['refresh_error']})")
+                print(f"  Status probe: failed ({row['refresh_error']})")
             if row["refresh_status"]:
-                print(f"  Refresh: {row['refresh_status']}")
+                print(f"  Status probe: {row['refresh_status']}")
 
         if args.history:
             print()
@@ -576,27 +589,20 @@ def _collect_profile_usage_rows(
     active_profile: str | None,
     current_root_profile: str | None,
     current_root_live_snapshot: object,
-    refresh: bool,
+    show_refresh_status: bool,
     timeout: int,
 ) -> list[dict[str, object]]:
+    profiles = store.list_profiles()
     rows: list[dict[str, object]] = []
-    for profile in store.list_profiles():
+    for profile in profiles:
         relation = relationships.get(profile.name, {})
         duplicate_of = relation.get("duplicate_of")
         refresh_error = None
         refresh_status = None
         status = None
-        cache = None if duplicate_of else store.read_quota_cache(profile.name)
+        snapshot = None if duplicate_of else _normalize_snapshot_for_display(store.read_quota_cache(profile.name))
         if duplicate_of:
             status = f"Duplicate identity of {duplicate_of}; usage suppressed"
-            if refresh:
-                refresh_status = f"skipped (duplicate identity of {duplicate_of})"
-        elif refresh:
-            try:
-                cache = refresh_profile_quota(store, profile.name, timeout_seconds=timeout)
-                store.write_quota_cache(profile.name, cache)
-            except Exception as exc:
-                refresh_error = str(exc)
 
         tags: list[str] = []
         if profile.name == active_profile:
@@ -609,11 +615,11 @@ def _collect_profile_usage_rows(
 
         cache_payload = None
         cache_age = None
-        if cache is not None:
-            cache_payload = cache.to_dict()
-            cache_age = _format_snapshot_age(cache.observed_at)
+        if snapshot is not None:
+            cache_payload = snapshot.to_dict()
+            cache_age = _format_snapshot_age(snapshot.observed_at)
 
-        display_snapshot = cache
+        display_snapshot = snapshot
         display_snapshot_label = None
         if (
             profile.name == current_root_profile
@@ -621,9 +627,9 @@ def _collect_profile_usage_rows(
             and hasattr(current_root_live_snapshot, "to_dict")
         ):
             display_snapshot = current_root_live_snapshot
-            display_snapshot_label = "Current root live snapshot"
-        elif cache is not None:
-            display_snapshot_label = "Refreshed snapshot" if cache.source == "live-probe" else "Cached snapshot"
+            display_snapshot_label = "Current root session snapshot"
+        elif snapshot is not None:
+            display_snapshot_label = "Cached snapshot"
 
         display_snapshot_payload = None
         display_snapshot_age = None
@@ -674,6 +680,69 @@ def _format_snapshot_windows(snapshot: object) -> list[str]:
     if secondary:
         windows.append(_format_window_line(secondary))
     return windows
+
+
+def _normalize_current_root_live_snapshot(
+    snapshot: object,
+    canonical_root_profile: object | None,
+    root_identity: object,
+) -> object:
+    if snapshot is None or not hasattr(snapshot, "with_source"):
+        return snapshot
+    snapshot = _normalize_snapshot_for_display(snapshot)
+    source = _current_root_snapshot_source(canonical_root_profile, root_identity)
+    if getattr(snapshot, "source", None) == source:
+        return snapshot
+    return snapshot.with_source(source)
+
+
+def _normalize_snapshot_for_display(snapshot: object) -> object:
+    if not isinstance(snapshot, RateLimitSnapshot):
+        return snapshot
+    primary = snapshot.primary
+    if primary is None or primary.resets_at is None or primary.resets_at > time.time():
+        return snapshot
+    return RateLimitSnapshot(
+        observed_at=snapshot.observed_at,
+        source=snapshot.source,
+        limit_id=snapshot.limit_id,
+        plan_type=snapshot.plan_type,
+        primary=RateLimitWindow(
+            used_percent=0.0,
+            remaining_percent=100.0,
+            window_minutes=primary.window_minutes,
+            resets_at=None,
+        ),
+        secondary=snapshot.secondary,
+    )
+
+
+def _current_root_snapshot_source(canonical_root_profile: object | None, root_identity: object) -> str:
+    if canonical_root_profile is not None:
+        return "root-session"
+    if _identity_is_empty(root_identity):
+        return "orphaned-root-session"
+    return "unmapped-root-session"
+
+
+def _current_root_usage_heading(canonical_root_profile: object | None, root_identity: object) -> str:
+    if canonical_root_profile is not None:
+        return "Current root usage"
+    if _identity_is_empty(root_identity):
+        return "Current root usage (old terminal / orphaned root-session)"
+    return "Current root usage (unmapped saved profile)"
+
+
+def _current_root_usage_source_detail(canonical_root_profile: object | None, root_identity: object) -> str:
+    if canonical_root_profile is not None:
+        return "local session snapshot"
+    if _identity_is_empty(root_identity):
+        return "local session snapshot from old terminal"
+    return "local session snapshot from unmapped root login"
+
+
+def _identity_is_empty(identity: object) -> bool:
+    return bool(hasattr(identity, "is_empty") and identity.is_empty())
 
 
 if __name__ == "__main__":
