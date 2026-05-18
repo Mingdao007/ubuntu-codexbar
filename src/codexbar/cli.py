@@ -135,19 +135,12 @@ def cmd_list(store: ProfileStore, as_json: bool) -> int:
         print("No profiles found.")
         return 0
 
-    for profile in profiles:
-        tags: list[str] = []
-        if profile.name == active:
-            tags.append("active")
-        provider = f" [{profile.provider}]" if profile.provider else ""
-        identity = _format_identity(profile)
-        relation = relationships.get(profile.name, {})
-        suffix = f" ({', '.join(tags)})" if tags else ""
-        print(f"{profile.name}{provider}{suffix}")
-        if identity:
-            print(f"  {identity}")
-        if relation.get("duplicate_of"):
-            print(f"  Duplicate of {relation['duplicate_of']}")
+    rendered_profiles = [_format_profile_block(profile, active=active, relationships=relationships) for profile in profiles]
+    for index, lines in enumerate(rendered_profiles):
+        for line in lines:
+            print(line)
+        if index < len(rendered_profiles) - 1:
+            print("-" * max(len(line) for line in lines))
     return 0
 
 
@@ -385,38 +378,42 @@ def cmd_usage(paths: AppPaths, store: ProfileStore, args: argparse.Namespace) ->
                 print("No current-root live session snapshot was found for this login.")
             print("Per-profile rows below use saved session snapshots.")
         if current_root_live_snapshot:
-            print(_current_root_usage_heading(canonical_root_profile, root_identity))
+            current_root_lines = [_current_root_usage_heading(canonical_root_profile, root_identity)]
             if canonical_root_profile_name:
-                print(f"  Profile: {canonical_root_profile_name}")
-            print(f"  As of: {_format_iso_datetime(current_root_live_snapshot.observed_at)}")
+                current_root_lines.append(f"  Profile: {canonical_root_profile_name}")
+            current_root_lines.append(f"  As of: {_format_iso_datetime(current_root_live_snapshot.observed_at)}")
             if current_root_live_snapshot.plan_type or current_root_live_snapshot.limit_id:
                 plan = current_root_live_snapshot.plan_type or "-"
                 limit_id = current_root_live_snapshot.limit_id or "-"
-                print(f"  Plan: {plan} ({limit_id})")
-            print(f"  Source: {_current_root_usage_source_detail(canonical_root_profile, root_identity)}")
+                current_root_lines.append(f"  Plan: {plan} ({limit_id})")
+            current_root_lines.append(f"  Source: {_current_root_usage_source_detail(canonical_root_profile, root_identity)}")
             for line in _format_snapshot_windows(current_root_live_snapshot):
-                print(f"  {line}")
+                current_root_lines.append(f"  {line}")
+            print()
+            _print_boxed_block(current_root_lines)
         for row in profile_rows:
-            print(row["header"])
+            block_lines = [row["header"]]
             if row["identity"]:
-                print(f"  Identity: {row['identity']}")
+                block_lines.append(f"  Identity: {row['identity']}")
             if row["status"]:
-                print(f"  {row['status']}")
+                block_lines.append(f"  {row['status']}")
             if row["display_snapshot"]:
-                print(
+                block_lines.append(
                     f"  {row['display_snapshot_label']}: "
                     f"{row['display_snapshot']['observed_at']} via {row['display_snapshot']['source'] or 'unknown'}"
                 )
                 for line in row["windows"]:
-                    print(f"  {line}")
+                    block_lines.append(f"  {line}")
                 if row["display_snapshot_age"]:
-                    print(f"  Snapshot age: {row['display_snapshot_age']}")
+                    block_lines.append(f"  Snapshot age: {row['display_snapshot_age']}")
             elif not row["status"]:
-                print("  Usage: unknown")
+                block_lines.append("  Usage: unknown")
             if row["refresh_error"]:
-                print(f"  Status probe: failed ({row['refresh_error']})")
+                block_lines.append(f"  Status probe: failed ({row['refresh_error']})")
             if row["refresh_status"]:
-                print(f"  Status probe: {row['refresh_status']}")
+                block_lines.append(f"  Status probe: {row['refresh_status']}")
+            print()
+            _print_boxed_block(block_lines)
 
         if args.history:
             print()
@@ -512,6 +509,22 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
+def _format_profile_block(profile, active: str | None, relationships: dict[str, dict[str, object]]) -> list[str]:
+    tags: list[str] = []
+    if profile.name == active:
+        tags.append("active")
+    provider = f" [{profile.provider}]" if profile.provider else ""
+    identity = _format_identity(profile)
+    relation = relationships.get(profile.name, {})
+    suffix = f" ({', '.join(tags)})" if tags else ""
+    lines = [f"{profile.name}{provider}{suffix}"]
+    if identity:
+        lines.append(f"  {identity}")
+    if relation.get("duplicate_of"):
+        lines.append(f"  Duplicate of {relation['duplicate_of']}")
+    return lines
+
+
 def _format_window_line(window: RateLimitWindow) -> str:
     label = _format_window_label(window.window_minutes)
     if window.resets_at is None:
@@ -581,6 +594,17 @@ def _print_history(summary: object, days: int | None) -> None:
         print("Top sessions:")
         for idx, session in enumerate(summary.top_sessions, start=1):
             print(f"  {idx}. {session.total_tokens}  {session.file_path}")
+
+
+def _print_boxed_block(lines: list[str]) -> None:
+    if not lines:
+        return
+    width = max(len(line) for line in lines)
+    border = "+" + "-" * (width + 2) + "+"
+    print(border)
+    for line in lines:
+        print(f"| {line.ljust(width)} |")
+    print(border)
 
 
 def _collect_profile_usage_rows(

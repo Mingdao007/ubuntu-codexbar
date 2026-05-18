@@ -11,7 +11,7 @@ import pytest
 
 import codexbar.quota_probe as quota_probe
 from codexbar.auth_identity import read_profile_identity
-from codexbar.cli import cmd_mark_session, cmd_usage, cmd_whoami
+from codexbar.cli import cmd_list, cmd_mark_session, cmd_usage, cmd_whoami
 from codexbar.fs_utils import read_json, write_json_atomic
 from codexbar.paths import AppPaths
 from codexbar.profile_store import ProfileStore
@@ -709,6 +709,76 @@ def test_usage_all_writes_root_session_cache_to_canonical_and_suppresses_duplica
     assert "Duplicate identity of main; usage suppressed" in output
     assert "main" in output
     assert "Current root session snapshot:" in output
+
+
+def test_list_separates_profile_blocks_with_longest_line_width(tmp_path, capsys):
+    codex_home = tmp_path / "codex"
+    codexbar_home = tmp_path / "codexbar"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    paths = AppPaths(codex_home=codex_home, codexbar_home=codexbar_home)
+    store = ProfileStore(paths)
+    store.ensure_layout()
+
+    alpha_dir = tmp_path / "alpha"
+    beta_dir = tmp_path / "beta"
+    _write_auth(alpha_dir / "auth.json", "acct-A", org_title="Main")
+    _write_auth(beta_dir / "auth.json", "acct-B", org_title="Workspace")
+    _write_config(alpha_dir / "config.toml")
+    _write_config(beta_dir / "config.toml")
+    store.create_profile_from_directory("alpha", alpha_dir, ["auth.json", "config.toml"], description="alpha")
+    store.create_profile_from_directory("beta-long", beta_dir, ["auth.json", "config.toml"], description="beta")
+    store.set_active_profile("alpha")
+
+    cmd_list(store, as_json=False)
+    output_lines = capsys.readouterr().out.strip().splitlines()
+
+    assert output_lines == [
+        "alpha (active)",
+        "  team / Main / acct-A",
+        "-" * len("  team / Main / acct-A"),
+        "beta-long",
+        "  team / Workspace / acct-B",
+    ]
+
+
+def test_usage_all_boxes_profile_rows(tmp_path, capsys):
+    codex_home = tmp_path / "codex"
+    codexbar_home = tmp_path / "codexbar"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    paths = AppPaths(codex_home=codex_home, codexbar_home=codexbar_home)
+    store = ProfileStore(paths)
+    store.ensure_layout()
+
+    alpha_dir = tmp_path / "alpha"
+    _write_auth(alpha_dir / "auth.json", "acct-A", org_title="Main")
+    _write_config(alpha_dir / "config.toml")
+    store.create_profile_from_directory("alpha", alpha_dir, ["auth.json", "config.toml"], description="alpha")
+    store.set_active_profile("alpha")
+
+    args = argparse.Namespace(
+        days=None,
+        top=5,
+        all_profiles=True,
+        refresh=False,
+        timeout=30,
+        history=False,
+        as_json=False,
+    )
+    cmd_usage(paths, store, args)
+    output = capsys.readouterr().out
+
+    block_lines = [
+        "alpha (active)",
+        "  Identity: team / Main / acct-A",
+        "  Usage: unknown",
+    ]
+    width = max(len(line) for line in block_lines)
+    border = "+" + "-" * (width + 2) + "+"
+    expected_block = "\n".join(
+        [border, *(f"| {line.ljust(width)} |" for line in block_lines), border]
+    )
+
+    assert expected_block in output
 
 
 def test_usage_all_refresh_keeps_duplicate_profiles_suppressed(tmp_path, capsys):
